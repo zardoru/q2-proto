@@ -1,7 +1,9 @@
 use clap::Parser;
-use std::process::Command;
+use std::process::{Child, Command};
 use std::{process, thread};
-use std::borrow::Cow;
+use std::borrow::{Cow, BorrowMut};
+use std::cell::RefCell;
+use std::sync::Mutex;
 use std::time::Duration;
 use q2_proto::Q2ProtoClient;
 
@@ -13,10 +15,6 @@ struct Args {
     /// port to use and ping status to
     #[arg(short, long, default_value_t = 27910)]
     port: u16,
-
-    /// port to bind the socket to (ip address is always loopback)
-    #[arg(short, long, default_value_t = 26000)]
-    bind_port: u16,
 
     /// dedicated server to run
     #[arg(short, long, default_value = "q2proded")]
@@ -35,6 +33,8 @@ struct Args {
     exec_args: Vec<String>
 }
 
+static CHILD: Mutex<RefCell<Option<Child>>> = Mutex::new(RefCell::new(None));
+
 fn main() {
     let mut args = Args::parse();
 
@@ -42,11 +42,35 @@ fn main() {
         format!("+set port {}", args.port),
         format!("+set net_port {}", args.port) // for q2pro
     ]);
+
+    ctrlc::set_handler(|| {
+        try_kill_child();
+
+        process::exit(0);
+    }).expect("couldn't set ctrl+c handler");
     
     loop {
         if !run_monitor(&args) {
             break
         }
+    }
+}
+
+fn try_kill_child() {
+    let maybe_proc = CHILD.lock();
+    if let Ok(mut maybe_child) = maybe_proc {
+        let cell = maybe_child.get_mut();
+        if let Some(proc) = cell.borrow_mut() {
+            match proc.kill()
+            {
+                Ok(_) => { println!("process killed") }
+                Err(_) => { eprintln!("couldn't kill process, maybe it's already dead") }
+            }
+        } else {
+            eprintln!("tried to kill child process, but no child process was set up");
+        }
+    } else {
+        eprintln!("couldn't get lock on child process");
     }
 }
 
@@ -63,19 +87,18 @@ fn run_monitor(args: &Args) -> bool {
                  .map(|x| x.to_string_lossy())
                  .collect::<Vec<Cow<'_, str>>>()
                  .join(" "));
-    let child = command.spawn();
 
-    if let Ok(mut proc) = child {
-        ctrlc::set_handler(move || {
-            match proc.kill() {
-                Ok(_) => { println!("process killed") }
-                Err(_) => { eprintln!("couldn't kill process, maybe it's already dead") }
-            }
-            process::exit(0);
-        }).expect("couldn't set ctrl+c handler");
+    let spawned_child = command.spawn();
+
+    if let Ok(proc) = spawned_child {
+        if let Ok(mut s) = CHILD.lock() {
+            s.borrow_mut().replace(Some(proc));
+        } else {
+            eprintln!("couldn't acquire mutex for child process?");
+        }
 
         let addr = format!("127.0.0.1:{}", args.port);
-        let client = Q2ProtoClient::new(&addr, "127.0.0.1", args.bind_port, "q2-servmon");
+        let client = Q2ProtoClient::new(&addr, "127.0.0.1", 0, "q2-servmon");
         if let Some(cl) = client {
             cl.set_read_timeout(Duration::from_secs(args.status_timeout as u64))
                 .expect("couldn't set read timeout on status socket");
@@ -83,7 +106,8 @@ fn run_monitor(args: &Args) -> bool {
             loop {
                 thread::sleep(Duration::from_secs(args.status_interval as u64));
                 if cl.status().is_none() {
-                    eprintln!("process died. exiting check loop.");
+                    try_kill_child();
+                    eprintln!("server is down. exiting check loop.");
                     return true
                 }
             }
@@ -92,7 +116,7 @@ fn run_monitor(args: &Args) -> bool {
             return false
         }
 
-    } else if let Err(e) = child {
+    } else if let Err(e) = spawned_child {
         eprintln!("failed to spawn child process for monitoring: {}", e.to_string());
         return false
     }

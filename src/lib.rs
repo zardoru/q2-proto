@@ -136,7 +136,7 @@ type ClientEventListener = fn(&ClientEvent);
 pub struct Q2ProtoClient {
     socket: UdpSocket,
     server_address: String,
-    port: u16,
+    bind_port: u16,
     connected: bool,
     chan: Box<NetChanVanilla>,
     events: HashMap<ServerToClientOps, Vec<ClientEventListener>>,
@@ -146,8 +146,8 @@ pub struct Q2ProtoClient {
 }
 
 impl Q2ProtoClient {
-    pub fn new(server: &str, bind_addr: &str, port: u16, version: &str) -> Option<Q2ProtoClient> {
-        let socket_opt = UdpSocket::bind(format!("{}:{}", bind_addr, port));
+    pub fn new(server: &str, bind_addr: &str, bind_port: u16, version: &str) -> Option<Q2ProtoClient> {
+        let socket_opt = UdpSocket::bind(format!("{}:{}", bind_addr, bind_port));
         let socket= match socket_opt {
             Ok(s) => s,
             _ => {
@@ -158,9 +158,9 @@ impl Q2ProtoClient {
         Some(Q2ProtoClient {
             socket,
             server_address: server.to_owned(),
-            port,
+            bind_port: bind_port,
             connected: false,
-            chan: Box::new(NetChanVanilla::new(true, port)),
+            chan: Box::new(NetChanVanilla::new(true, bind_port)),
             events: HashMap::new(),
             version: version.to_string(),
             last_precache_value: 0,
@@ -260,7 +260,7 @@ impl Q2ProtoClient {
         let msg = format!(
             "connect {} {} {} \"{}\"\n",
             proto as u8,
-            self.port,
+            self.bind_port,
             challenge.ch_value,
             userinfo.as_string()
         );
