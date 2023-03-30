@@ -14,6 +14,10 @@ struct Args {
     #[arg(short, long, default_value_t = 27910)]
     port: u16,
 
+    /// port to bind the socket to (ip address is always loopback)
+    #[arg(short, long, default_value_t = 26000)]
+    bind_port: u16,
+
     /// dedicated server to run
     #[arg(short, long, default_value = "q2proded")]
     executable: String,
@@ -70,7 +74,8 @@ fn run_monitor(args: &Args) -> bool {
             process::exit(0);
         }).expect("couldn't set ctrl+c handler");
 
-        let client = Q2ProtoClient::new("127.0.0.1", args.port, "q2-servmon");
+        let addr = format!("127.0.0.1:{}", args.port);
+        let client = Q2ProtoClient::new(&addr, "127.0.0.1", args.bind_port, "q2-servmon");
         if let Some(cl) = client {
             cl.set_read_timeout(Duration::from_secs(args.status_timeout as u64))
                 .expect("couldn't set read timeout on status socket");

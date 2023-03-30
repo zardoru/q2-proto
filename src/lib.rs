@@ -135,7 +135,7 @@ type ClientEventListener = fn(&ClientEvent);
 
 pub struct Q2ProtoClient {
     socket: UdpSocket,
-    srv_addr: String,
+    server_address: String,
     port: u16,
     connected: bool,
     chan: Box<NetChanVanilla>,
@@ -146,8 +146,8 @@ pub struct Q2ProtoClient {
 }
 
 impl Q2ProtoClient {
-    pub fn new(srv_addr_in: &str, port: u16, version: &str) -> Option<Q2ProtoClient> {
-        let socket_opt = UdpSocket::bind(format!("0.0.0.0:{}", port));
+    pub fn new(server: &str, bind_addr: &str, port: u16, version: &str) -> Option<Q2ProtoClient> {
+        let socket_opt = UdpSocket::bind(format!("{}:{}", bind_addr, port));
         let socket= match socket_opt {
             Ok(s) => s,
             _ => {
@@ -157,7 +157,7 @@ impl Q2ProtoClient {
 
         Some(Q2ProtoClient {
             socket,
-            srv_addr: String::from(srv_addr_in),
+            server_address: server.to_owned(),
             port,
             connected: false,
             chan: Box::new(NetChanVanilla::new(true, port)),
@@ -180,7 +180,7 @@ impl Q2ProtoClient {
         let mut send = Vec::with_capacity(4 + msg.len());
         send.extend_from_slice(OOB_PREFIX.as_slice());
         send.extend_from_slice(msg);
-        self.socket.send_to(&send, &self.srv_addr)
+        self.socket.send_to(&send, &self.server_address)
     }
 
     fn recv_connectionless(&self) -> Option<String> {
@@ -189,7 +189,7 @@ impl Q2ProtoClient {
             self.socket.recv(&mut buf).ok()?
         } else {
             let (bytes, _addr) = self.socket.recv_from(&mut buf).ok()?;
-            if _addr != self.srv_addr.parse().unwrap() {
+            if _addr != self.server_address.parse().unwrap() {
                 return None; // not our server...
             }
 
@@ -267,7 +267,7 @@ impl Q2ProtoClient {
 
         self.oob_print(msg.as_ref()).ok()?;
 
-        self.socket.connect(&self.srv_addr).ok()?;
+        self.socket.connect(&self.server_address).ok()?;
         self.connected = true; // we did it! we're considered to be 'connected'.
 
         self.parse_client_connect();
