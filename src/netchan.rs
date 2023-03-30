@@ -1,7 +1,7 @@
-use std::io::{Cursor, Seek, Write};
 use super::MsgBuf;
-use byteorder::{ReadBytesExt, LittleEndian, WriteBytesExt};
-use crate::proto::MAX_WRITEABLE_SIZE;
+use super::MAX_WRITEABLE_SIZE;
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+use std::io::{Cursor, Seek, Write};
 
 pub trait NetChan {
     // If it returns true, the packet should be used.
@@ -10,10 +10,9 @@ pub trait NetChan {
     fn should_transmit(&self) -> bool;
 }
 
-pub struct NetChanVanilla
-{
+pub struct NetChanVanilla {
     pub message: MsgBuf,
-    incoming_sequence: u32, // unreliable packet number last received
+    incoming_sequence: u32,     // unreliable packet number last received
     incoming_acknowledged: u32, // last reliable packet received
 
     last_sent_reliable_sequence: u32, // "sequence number of last send" == last_reliable_sequence in chan.c
@@ -22,14 +21,14 @@ pub struct NetChanVanilla
 
     // reliability ack
     incoming_reliable_acknowledged: bool, // not sure what this is yet?
-    incoming_reliable_sequence: bool, // Value that follows last reliable sequence received.
-    reliable_sequence: bool, // outgoing reliable sequence
+    incoming_reliable_sequence: bool,     // Value that follows last reliable sequence received.
+    reliable_sequence: bool,              // outgoing reliable sequence
     is_reliable_ack_pending: bool,
 
     is_client: bool,
     qport: u16,
 
-    reliable_buf: Cursor<[u8; MAX_WRITEABLE_SIZE]>
+    reliable_buf: Cursor<[u8; MAX_WRITEABLE_SIZE]>,
 }
 
 impl NetChanVanilla {
@@ -47,11 +46,10 @@ impl NetChanVanilla {
             is_client,
             qport,
             is_reliable_ack_pending: false,
-            reliable_buf: Cursor::new([0; MAX_WRITEABLE_SIZE])
+            reliable_buf: Cursor::new([0; MAX_WRITEABLE_SIZE]),
         }
     }
 }
-
 
 // old q2/r1q2 netchan
 impl NetChan for NetChanVanilla {
@@ -65,8 +63,8 @@ impl NetChan for NetChanVanilla {
             let _qport = cur.read_u16::<LittleEndian>();
         }
 
-        if !seq_opt.is_ok() || !seq_ack_opt.is_ok() {
-            return false
+        if seq_opt.is_err() || seq_ack_opt.is_err() {
+            return false;
         }
 
         let mut seq = seq_opt.unwrap();
@@ -78,7 +76,9 @@ impl NetChan for NetChanVanilla {
         seq &= 0x7FFFFFFF;
         seq_ack &= 0x7FFFFFFF;
 
-        if seq <= self.incoming_sequence { return false; }
+        if seq <= self.incoming_sequence {
+            return false;
+        }
 
         self.incoming_reliable_acknowledged = is_reliable_ack;
         if is_reliable_ack == self.reliable_sequence {
@@ -94,13 +94,14 @@ impl NetChan for NetChanVanilla {
             self.incoming_reliable_sequence = !self.incoming_reliable_sequence;
         }
 
-        return true;
+        true
     }
 
     fn transmit(&mut self, data: &[u8]) -> Cursor<[u8; MAX_WRITEABLE_SIZE]> {
         let mut should_send_reliable = false;
-        if self.incoming_acknowledged > self.last_sent_reliable_sequence &&
-            self.incoming_reliable_acknowledged != self.reliable_sequence {
+        if self.incoming_acknowledged > self.last_sent_reliable_sequence
+            && self.incoming_reliable_acknowledged != self.reliable_sequence
+        {
             should_send_reliable = true;
         }
 
@@ -146,14 +147,15 @@ impl NetChan for NetChanVanilla {
 
         if should_send_reliable {
             let data_ref = self.reliable_buf.get_ref();
-            packet.write_all(&data_ref[..(self.reliable_buf.position() as usize)]).unwrap();
+            packet
+                .write_all(&data_ref[..(self.reliable_buf.position() as usize)])
+                .unwrap();
             self.last_sent_reliable_sequence = self.outgoing_sequence;
         }
 
         // can use this once it stabilizes. until then...
         // if packet.remaining_slice() >= data.len() { }
-        if MAX_WRITEABLE_SIZE - (packet.position() as usize) >= data.len()
-            && data.len() > 0 {
+        if MAX_WRITEABLE_SIZE - (packet.position() as usize) >= data.len() && !data.is_empty() {
             packet.write_all(data).unwrap();
         }
 

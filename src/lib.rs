@@ -1,17 +1,20 @@
+pub mod msg_buf;
+pub mod netchan;
+pub mod objects;
 pub mod user_info;
-mod msg_buf;
-mod netchan;
-mod objects;
 
+use byteorder::{ReadBytesExt, WriteBytesExt};
+use msg_buf::MsgBuf;
+use netchan::{NetChan, NetChanVanilla};
+use objects::{
+    parse_baseline, parse_configstring, parse_print, parse_serverdata, parse_string, DeltaEntity,
+    PrintLevel, ServerDataMessage,
+};
 use std::collections::HashMap;
 use std::io::{Cursor, ErrorKind, Write};
 use std::net::UdpSocket;
 use std::time::{Duration, Instant};
-use byteorder::{ReadBytesExt, WriteBytesExt};
-use msg_buf::MsgBuf;
 use user_info::UserInfo;
-use netchan::{NetChan, NetChanVanilla};
-use objects::{DeltaEntity, parse_baseline, parse_configstring, parse_print, parse_serverdata, parse_string, PrintLevel, ServerDataMessage};
 
 #[derive(PartialEq, Debug)]
 pub enum ProtocolVersion {
@@ -40,6 +43,7 @@ const MAX_WRITEABLE_SIZE: usize = 4096;
 const MAX_NET_STRING: usize = 2048;
 const OOB_PREFIX: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
 
+#[allow(dead_code)]
 pub struct Challenge {
     ch_value: String,
     protocols: String,
@@ -111,7 +115,7 @@ impl From<u8> for ServerToClientOps {
             22 => ServerToClientOps::ZDownload,
             23 => ServerToClientOps::Gamestate,
             24 => ServerToClientOps::Setting,
-            _ => ServerToClientOps::Invalid
+            _ => ServerToClientOps::Invalid,
         }
     }
 }
@@ -138,24 +142,18 @@ pub struct Q2ProtoClient {
     events: HashMap<ServerToClientOps, Vec<ClientEventListener>>,
     version: String,
     last_precache_value: u32,
-    last_msg_sent_time: Instant
-}
-
-
-impl Q2ProtoClient {
-    pub(crate) fn is_connected(&self) -> bool {
-        self.connected
-    }
+    last_msg_sent_time: Instant,
 }
 
 impl Q2ProtoClient {
-    pub fn new(srv_addr_in: &str, port: u16, version: String) -> Option<Q2ProtoClient> {
+    pub fn new(srv_addr_in: &str, port: u16, version: &str) -> Option<Q2ProtoClient> {
         let socket_opt = UdpSocket::bind(format!("0.0.0.0:{}", port));
-        let socket;
-        match socket_opt {
-            Ok(s) => socket = s,
-            _ => { return None; }
-        }
+        let socket= match socket_opt {
+            Ok(s) => s,
+            _ => {
+                return None;
+            }
+        };
 
         Some(Q2ProtoClient {
             socket,
@@ -164,13 +162,17 @@ impl Q2ProtoClient {
             connected: false,
             chan: Box::new(NetChanVanilla::new(true, port)),
             events: HashMap::new(),
-            version,
+            version: version.to_string(),
             last_precache_value: 0,
-            last_msg_sent_time: Instant::now()
+            last_msg_sent_time: Instant::now(),
         })
     }
 
-    fn set_read_timeout(&self, timeout: Duration) -> std::io::Result<()> {
+    pub fn is_connected(&self) -> bool {
+        self.connected
+    }
+
+    pub fn set_read_timeout(&self, timeout: Duration) -> std::io::Result<()> {
         self.socket.set_read_timeout(Some(timeout))
     }
 
@@ -183,18 +185,16 @@ impl Q2ProtoClient {
 
     fn recv_connectionless(&self) -> Option<String> {
         let mut buf = [0u8; 1500];
-        let recv_bytes;
-        if self.connected {
-            let bytes = self.socket.recv(&mut buf).ok()?;
-            recv_bytes = bytes
+        let recv_bytes = if self.connected {
+            self.socket.recv(&mut buf).ok()?
         } else {
             let (bytes, _addr) = self.socket.recv_from(&mut buf).ok()?;
             if _addr != self.srv_addr.parse().unwrap() {
                 return None; // not our server...
             }
 
-            recv_bytes = bytes
-        }
+            bytes
+        };
 
         if buf[..4] != OOB_PREFIX {
             return None; // not connectionless
@@ -213,8 +213,10 @@ impl Q2ProtoClient {
 
         // we're good. skip the prefix and return the challenge
         let str = self.recv_connectionless()?;
-        let mut split_pat = str.split(" ");
-        if split_pat.next() != Some("challenge") { return None; };
+        let mut split_pat = str.split(' ');
+        if split_pat.next() != Some("challenge") {
+            return None;
+        };
 
         let ch_value: &str = split_pat.next()?;
         let protos: &str = split_pat.next()?;
@@ -230,26 +232,38 @@ impl Q2ProtoClient {
     }
 
     pub fn send_command(&mut self, cmd: &str) -> Option<()> {
-        if !self.connected { return None; }
+        if !self.connected {
+            return None;
+        }
 
-        self.chan.message.cur.write_u8(ClientToServerOps::StringCmd as u8).ok()?;
+        self.chan
+            .message
+            .cur
+            .write_u8(ClientToServerOps::StringCmd as u8)
+            .ok()?;
         self.chan.message.write_string(cmd)?;
 
         Some(())
     }
 
-    pub fn connect(&mut self, challenge: Challenge, proto: ProtocolVersion, userinfo: UserInfo) -> Option<()> {
-
+    pub fn connect(
+        &mut self,
+        challenge: Challenge,
+        proto: ProtocolVersion,
+        userinfo: UserInfo,
+    ) -> Option<()> {
         // woops it takes more work than this to get r1q2 and q2pro support!
         self.last_msg_sent_time = Instant::now();
         assert_eq!(proto, ProtocolVersion::Vanilla);
 
         // send the connect message
-        let msg = format!("connect {} {} {} \"{}\"\n",
-                          proto as u8,
-                          self.port,
-                          challenge.ch_value,
-                          userinfo.as_string());
+        let msg = format!(
+            "connect {} {} {} \"{}\"\n",
+            proto as u8,
+            self.port,
+            challenge.ch_value,
+            userinfo.as_string()
+        );
 
         self.oob_print(msg.as_ref()).ok()?;
 
@@ -263,7 +277,10 @@ impl Q2ProtoClient {
         Some(())
     }
 
-    fn parse_command<T: AsRef<[u8]>>(&mut self, cursor: &mut Cursor<T>) -> Result<Vec<ClientEvent>, std::io::Error> {
+    fn parse_command<T: AsRef<[u8]>>(
+        &mut self,
+        cursor: &mut Cursor<T>,
+    ) -> Result<Vec<ClientEvent>, std::io::Error> {
         let mut evts = vec![];
 
         loop {
@@ -274,29 +291,16 @@ impl Q2ProtoClient {
 
             let cmd = ServerToClientOps::from(cmd_val.unwrap());
 
-            let op: Option<ClientEvent> = match cmd
-            {
+            let op: Option<ClientEvent> = match cmd {
                 ServerToClientOps::Bad => {
                     return Err(std::io::Error::from(ErrorKind::InvalidInput));
                 }
-                ServerToClientOps::MuzzleFlash => {
-                    None
-                }
-                ServerToClientOps::MuzzleFlash2 => {
-                    None
-                }
-                ServerToClientOps::TempEntity => {
-                    None
-                }
-                ServerToClientOps::Layout => {
-                    None
-                }
-                ServerToClientOps::Inventory => {
-                    None
-                }
-                ServerToClientOps::Nop => {
-                    None
-                }
+                ServerToClientOps::MuzzleFlash => None,
+                ServerToClientOps::MuzzleFlash2 => None,
+                ServerToClientOps::TempEntity => None,
+                ServerToClientOps::Layout => None,
+                ServerToClientOps::Inventory => None,
+                ServerToClientOps::Nop => None,
                 ServerToClientOps::Disconnect => {
                     println!("DISCONNECT BYTE RECV");
                     self.send_command("disconnect");
@@ -307,12 +311,8 @@ impl Q2ProtoClient {
                     self.send_command("disconnect");
                     Some(ClientEvent::Reconnect)
                 }
-                ServerToClientOps::Sound => {
-                    None
-                }
-                ServerToClientOps::Print => {
-                    parse_print(cursor)
-                }
+                ServerToClientOps::Sound => None,
+                ServerToClientOps::Print => parse_print(cursor),
                 ServerToClientOps::StuffText => {
                     // If we receive a \177c (7f6c -- a short) we need to reply with a command
                     // containing whatever value it requested of us.
@@ -323,56 +323,31 @@ impl Q2ProtoClient {
                         None
                     }
                 }
-                ServerToClientOps::ServerData => {
-                    parse_serverdata(cursor)
-                }
-                ServerToClientOps::ConfigString => {
-                    parse_configstring(cursor)
-                }
-                ServerToClientOps::SpawnBaseline => {
-                    parse_baseline(cursor)
-                }
+                ServerToClientOps::ServerData => parse_serverdata(cursor),
+                ServerToClientOps::ConfigString => parse_configstring(cursor),
+                ServerToClientOps::SpawnBaseline => parse_baseline(cursor),
                 ServerToClientOps::CenterPrint => {
                     Some(ClientEvent::CenterPrint(parse_string(cursor)))
                 }
-                ServerToClientOps::Download => {
-                    None
-                }
+                ServerToClientOps::Download => None,
                 ServerToClientOps::PlayerInfo => {
                     None // this should be included in Frame
                 }
-                ServerToClientOps::PacketEntities => {
-                    None
-                }
-                ServerToClientOps::DeltaPacketEntities => {
-                    None
-                }
-                ServerToClientOps::Frame => {
-                    None
-                }
-                ServerToClientOps::ZPacket => {
-                    None
-                }
-                ServerToClientOps::ZDownload => {
-                    None
-                }
-                ServerToClientOps::Gamestate => {
-                    None
-                }
-                ServerToClientOps::Setting => {
-                    None
-                }
-                ServerToClientOps::Invalid => {
-                    None
-                }
+                ServerToClientOps::PacketEntities => None,
+                ServerToClientOps::DeltaPacketEntities => None,
+                ServerToClientOps::Frame => None,
+                ServerToClientOps::ZPacket => None,
+                ServerToClientOps::ZDownload => None,
+                ServerToClientOps::Gamestate => None,
+                ServerToClientOps::Setting => None,
+                ServerToClientOps::Invalid => None,
             };
 
-            if op.is_some() {
-                let unwrapped_op = op.unwrap();
+            if let Some(unwrapped_op) = op {
                 let vec_listeners = self.events.get(&cmd);
 
-                if vec_listeners.is_some() {
-                    for item in vec_listeners.unwrap() {
+                if let Some(listeners) = vec_listeners {
+                    for item in listeners {
                         item(&unwrapped_op);
                     }
                 }
@@ -384,23 +359,26 @@ impl Q2ProtoClient {
             }
         }
 
-
         Ok(evts)
     }
 
     fn parse_client_connect(&mut self) -> Option<()> {
         let data = self.recv_connectionless()?;
-        let mut response = data.split(" ");
+        let mut response = data.split(' ');
 
-        if response.next() != Some("client_connect") { return None; }
+        if response.next() != Some("client_connect") {
+            return None;
+        }
 
         for re in response {
-            if re.starts_with("ac=") { // anticheat
+            if re.starts_with("ac=") {
+                // anticheat
                 self.connected = false;
                 return None;
-            } else if re.starts_with("map=") { // map
-            } else if re.starts_with("nc=") { // netchan
-            }
+            } 
+            // else if re.starts_with("map=") { // map
+            // } else if re.starts_with("nc=") { // netchan
+            // }
         }
 
         Some(())
@@ -420,11 +398,13 @@ impl Q2ProtoClient {
     }
 
     pub fn pump(&mut self) -> Result<(), std::io::Error> {
-        if !self.connected { return Err(std::io::Error::from(ErrorKind::NotConnected)); }
+        if !self.connected {
+            return Err(std::io::Error::from(ErrorKind::NotConnected));
+        }
 
         let mut buf = [0u8; MAX_WRITEABLE_SIZE];
 
-        while let Ok(_) = self.socket.peek(&mut buf) {
+        while self.socket.peek(&mut buf).is_ok() {
             let res = self.socket.recv(&mut buf)?;
             let mut cur = Cursor::new(&buf[..res]);
 
@@ -458,23 +438,29 @@ impl Q2ProtoClient {
         Ok(())
     }
 
-    fn send_nop(&mut self) -> Option<()>{
-        self.chan.message.cur.write_u8(ClientToServerOps::Nop as u8).ok()
+    fn send_nop(&mut self) -> Option<()> {
+        self.chan
+            .message
+            .cur
+            .write_u8(ClientToServerOps::Nop as u8)
+            .ok()
     }
 
-    fn check_stuffcmd(&mut self, stuff_text: &Vec<u8>) -> bool {
+    fn check_stuffcmd(&mut self, stuff_text: &[u8]) -> bool {
         let cmd_list = stuff_text.split(|f| *f == b'\n');
 
         for cmd in cmd_list {
             let stuffcmd_head = b"cmd \x7fc";
-            let bytes: &[u8] = cmd.as_ref();
+            let bytes: &[u8] = cmd;
 
             // Let the protocol (us) handle it.
             // The way Q2 does is by actually expanding the variables but we do the minimum work possible.
             if bytes.starts_with(stuffcmd_head) {
                 let cmd_slice = &bytes[7..];
                 let cmd_str_opt = String::from_utf8(cmd_slice.to_vec());
-                if cmd_str_opt.is_err() { return false; }
+                if cmd_str_opt.is_err() {
+                    return false;
+                }
 
                 let cmd_str = cmd_str_opt.unwrap();
                 println!("cmd: {cmd_str}");
@@ -491,8 +477,8 @@ impl Q2ProtoClient {
             if bytes.starts_with(precache_cmd) {
                 // cmd_precache_f
                 // throw an event that requests a precache?
-                self.last_precache_value = String::from_utf8(bytes[9..].to_vec())
-                    .map_or(0, |f| f.parse().unwrap_or(0));
+                self.last_precache_value =
+                    String::from_utf8(bytes[9..].to_vec()).map_or(0, |f| f.parse().unwrap_or(0));
 
                 let msg = format!("begin {}", self.last_precache_value);
                 self.send_command(msg.as_ref());
@@ -503,14 +489,20 @@ impl Q2ProtoClient {
             }
         }
 
-        return true; // Pass it to the client
+        true // Pass it to the client
     }
 
     fn send_result_command(&mut self, cmd: &str) -> Option<()> {
-        if !self.connected { return None; }
+        if !self.connected {
+            return None;
+        }
 
-        self.chan.message.cur.write_u8(ClientToServerOps::StringCmd as u8).ok()?;
-        self.chan.message.cur.write(b"\x7fc ").ok()?;
+        self.chan
+            .message
+            .cur
+            .write_u8(ClientToServerOps::StringCmd as u8)
+            .ok()?;
+        self.chan.message.cur.write_all(b"\x7fc ").ok()?;
         self.chan.message.write_string(cmd)?;
 
         Some(())
